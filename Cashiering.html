@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>鼎盛轩 · 前台收银 POS 终端 (时价安全校验与会员消费同步版)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+    <style>
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 10px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        .receipt-font { font-family: 'Courier New', Courier, monospace; }
+        @keyframes pulse-fast {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        .animate-pulse-fast { animation: pulse-fast 1s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+    </style>
+</head>
+<body class="bg-[#F8F5F0] text-slate-800 h-screen flex flex-col overflow-hidden">
+
+    <!-- 顶部状态栏 -->
+    <header class="bg-slate-900 text-white px-6 py-3 shadow-lg flex justify-between items-center flex-shrink-0 z-30">
+        <div class="flex items-center gap-3">
+            <span class="text-2xl">🏮</span>
+            <div>
+                <h1 class="text-lg font-black tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-amber-400 to-amber-200">
+                    鼎盛轩 · 前台收银 POS 终端
+                </h1>
+                <p class="text-[10px] text-slate-400">已连接云端数据库 (实时监听点餐与会员档案中)</p>
+            </div>
+        </div>
+        <div class="flex items-center space-x-4 text-xs font-bold">
+            <div class="flex items-center space-x-2 bg-slate-800 px-3 py-1.5 rounded-lg border border-slate-700">
+                <span id="db-status-dot" class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-ping"></span>
+                <span class="text-slate-300">云端同步：<span id="db-status-text" class="text-amber-400">正在连接...</span></span>
+            </div>
+            <div id="current-time" class="text-amber-300 font-mono text-sm">--:--:--</div>
+        </div>
+    </header>
+
+    <!-- 优雅高级的非阻塞 Toast 提示框 -->
+    <div id="pos-toast" class="fixed top-6 left-1/2 transform -translate-x-1/2 bg-[#2C221E] text-[#FFD700] border border-[#D4AF37] px-6 py-3 rounded-full text-xs font-bold shadow-2xl opacity-0 transition-opacity duration-300 pointer-events-none z-50 flex items-center space-x-2">
+        <span id="pos-toast-text">提示信息</span>
+    </div>
+
+    <!-- 主体收银台界面 -->
+    <div class="flex-1 flex overflow-hidden bg-[#F8F5F0]">
+        
+        <!-- 左侧桌台矩阵 (55% 宽度) -->
+        <div class="w-[55%] border-r border-[#E6D5B8] p-4 flex flex-col justify-between bg-[#FBF9F5] overflow-hidden">
+            <div class="flex items-center justify-between mb-3 bg-white p-2.5 rounded-2xl border border-[#E6D5B8] flex-shrink-0 shadow-sm">
+                <div class="flex space-x-2">
+                    <button onclick="filterTables('all')" id="tab-all" class="px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white shadow">全部桌台</button>
+                    <button onclick="filterTables('occupied')" id="tab-occupied" class="px-3.5 py-2 rounded-xl text-xs font-bold bg-[#FFF9EB] text-[#C59B27] border border-[#E6C687]">用餐中 · 待付款</button>
+                    <button onclick="filterTables('free')" id="tab-free" class="px-3.5 py-2 rounded-xl text-xs font-bold bg-[#F2EDE4] text-[#5C4A42] border border-[#E6D5B8]">空闲桌台</button>
+                </div>
+                <span class="text-[11px] text-[#8C7A6B] font-bold">💡 手机端点餐秒级同步</span>
+            </div>
+
+            <!-- 动态桌台网格 (V1-V12) -->
+            <div id="tables-grid" class="grid grid-cols-4 gap-3 overflow-y-auto flex-1 pr-1 no-scrollbar"></div>
+
+            <!-- 图例 -->
+            <div class="mt-2 pt-2 border-t border-[#E6D5B8] flex justify-center space-x-12 text-xs font-bold text-[#7A6B63] flex-shrink-0">
+                <div class="flex items-center space-x-2"><span class="w-3.5 h-3.5 rounded-md bg-emerald-100 border border-emerald-400"></span><span>🟢 空闲桌</span></div>
+                <div class="flex items-center space-x-2"><span class="w-3.5 h-3.5 rounded-md bg-amber-100 border border-amber-400"></span><span>🟠 用餐中 · 待付款</span></div>
+            </div>
+        </div>
+
+        <!-- 右侧账单与收银结算区 (45% 宽度) -->
+        <div class="w-[45%] p-4 flex flex-col justify-between bg-[#F8F5F0] overflow-hidden">
+            <div class="bg-white border border-[#E6D5B8] rounded-2xl p-3 mb-2 shadow-sm flex justify-between items-center flex-shrink-0">
+                <div>
+                    <span class="text-[10px] text-[#8C7A6B] font-bold block">当前选中桌位：</span>
+                    <h2 id="selected-table-title" class="text-xl font-black text-[#2C221E]">请选择桌台</h2>
+                </div>
+                <div class="flex items-center space-x-2">
+                    <button onclick="openFullOrderModal()" class="bg-[#F2EDE4] text-[#5C4A42] border border-[#E6D5B8] px-3 py-1.5 rounded-xl text-xs font-bold shadow-sm transition active:scale-95 flex items-center space-x-1">
+                        <span>🔍 查看完整菜单</span>
+                    </button>
+                    <div class="text-right">
+                        <span class="text-[9px] text-[#8C7A6B] block font-semibold">关联手机号档案：</span>
+                        <span id="selected-customer-phone" class="text-xs font-mono font-bold text-[#C59B27] bg-[#FFF9EB] px-2 py-0.5 rounded-lg border border-[#E6C687] inline-block mt-0.5">未绑定</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 菜品列表 -->
+            <div class="bg-white border border-[#E6D5B8] rounded-2xl p-3 flex-[1.4] flex flex-col mb-2 overflow-hidden shadow-sm min-h-0">
+                <div class="flex justify-between text-xs text-[#8C7A6B] font-bold border-b border-[#F2EDE4] pb-2 mb-2 px-1 flex-shrink-0">
+                    <span>菜品名称与做法备注</span>
+                    <span>数量</span>
+                    <span class="text-right">小计 (RM)</span>
+                </div>
+                <div id="order-items-list" class="flex-1 overflow-y-auto space-y-2 pr-1 no-scrollbar text-xs min-h-0">
+                    <div class="text-center text-[#8C7A6B] py-20 font-bold text-xs">请在左侧点击查看具体桌台的订单</div>
+                </div>
+            </div>
+
+            <!-- 结算面板 -->
+            <div class="bg-white border border-[#E6D5B8] rounded-2xl p-3 space-y-2 shadow-sm flex-shrink-0">
+                <div class="flex justify-between items-baseline border-b border-[#F2EDE4] pb-1.5">
+                    <span class="text-[#5C4A42] text-xs font-bold">应收总金额 (Grand Total)：</span>
+                    <span class="text-2xl font-black text-[#C59B27] font-mono">RM <span id="bill-total-price">0.00</span></span>
+                </div>
+
+                <div>
+                    <div class="grid grid-cols-3 gap-2">
+                        <button onclick="selectPayment('cash')" id="pay-cash" class="pay-btn border-2 border-[#D4AF37] bg-[#FFF9EB] text-[#2C221E] font-bold py-1.5 rounded-xl text-xs flex flex-col items-center shadow-sm">
+                            <span class="text-xs">💵</span><span>现金 Cash</span>
+                        </button>
+                        <button onclick="selectPayment('qr')" id="pay-qr" class="pay-btn border border-[#E6D5B8] bg-white text-[#5C4A42] font-bold py-1.5 rounded-xl text-xs flex flex-col items-center">
+                            <span class="text-xs">📱</span><span>DuitNow / TNG</span>
+                        </button>
+                        <button onclick="selectPayment('card')" id="pay-card" class="pay-btn border border-[#E6D5B8] bg-white text-[#5C4A42] font-bold py-1.5 rounded-xl text-xs flex flex-col items-center">
+                            <span class="text-xs">💳</span><span>Card / PayWave</span>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="cash-calculator" class="bg-[#FBF9F5] p-2 rounded-xl border border-[#E6D5B8] space-y-1">
+                    <div class="flex justify-between items-center text-xs">
+                        <span class="text-[#5C4A42] font-bold">实收现金：</span>
+                        <input type="number" id="cash-received" oninput="calculateChange()" placeholder="输入金额" class="w-24 bg-white border border-[#D4AF37] rounded-lg px-2 py-1 text-right text-[#2C221E] font-black font-mono text-xs focus:outline-none">
+                    </div>
+                    <div class="flex justify-between items-center text-xs border-t border-[#E6D5B8] pt-1">
+                        <span class="text-[#5C4A42] font-bold">应找零钱 (Change)：</span>
+                        <span class="text-emerald-700 font-black font-mono text-xs">RM <span id="cash-change">0.00</span></span>
+                    </div>
+                </div>
+
+                <button onclick="promptCheckout()" class="w-full bg-gradient-to-r from-[#D4AF37] via-[#E6C687] to-[#C59B27] text-white font-black py-3 rounded-xl shadow-md text-xs active:scale-98 transition flex items-center justify-center space-x-2">
+                    <span>🧾 确认结账并打印收据 (安全防误触)</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 🔍 查看完整大屏菜单弹窗 -->
+    <div id="full-order-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-[#FFFDF9] border border-[#E6D5B8] rounded-[2rem] p-6 max-w-lg w-full shadow-2xl flex flex-col max-h-[85vh]">
+            <div class="flex justify-between items-center border-b border-[#E6D5B8] pb-3 mb-3">
+                <h3 class="text-base font-black text-[#2C221E] flex items-center">
+                    🔍 <span id="full-modal-table-title">V1 桌</span> · 顾客完整点餐清单
+                </h3>
+                <button onclick="closeFullOrderModal()" class="text-[#7A6B63] hover:text-[#2C221E] text-xl font-bold px-2">✕</button>
+            </div>
+            <div id="full-order-items-container" class="overflow-y-auto space-y-2.5 flex-1 pr-1 text-xs divide-y divide-[#F2EDE4]"></div>
+            <div class="mt-4 pt-3 border-t border-[#E6D5B8] flex justify-between items-center">
+                <span class="text-xs text-[#5C4A42] font-bold">该桌应收总计：</span>
+                <span class="text-xl font-black text-[#C59B27] font-mono">RM <span id="full-modal-total">0.00</span></span>
+            </div>
+            <button onclick="closeFullOrderModal()" class="mt-3 w-full bg-[#D4AF37] text-white font-bold py-3 rounded-xl text-xs shadow">核对无误，关闭返回</button>
+        </div>
+    </div>
+
+    <!-- ⚠️ 结账二次防误触确认弹窗 -->
+    <div id="checkout-confirm-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-[#FFFDF9] border border-[#E6D5B8] rounded-[2rem] p-6 max-w-sm w-full shadow-2xl text-center space-y-4">
+            <div class="text-4xl">⚠️</div>
+            <h3 class="text-base font-black text-[#2C221E]">安全结账二次确认</h3>
+            <p class="text-xs text-[#7A6B63] leading-relaxed">
+                您即将对 <strong id="confirm-modal-table" class="text-[#C59B27] text-sm">-- 桌</strong> 进行结账操作<br>
+                应收总额：<strong class="text-emerald-700 font-mono text-sm font-black">RM <span id="confirm-modal-total">0.00</span></strong><br>
+                结算后系统将自动打印收据并释放桌台，请核对无误！
+            </p>
+            <div class="flex space-x-2 pt-2">
+                <button onclick="closeCheckoutConfirmModal()" class="flex-1 bg-[#F2EDE4] text-[#5C4A42] font-bold py-2.5 rounded-xl text-xs">取消返回</button>
+                <button onclick="executeCheckout()" class="flex-1 bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white font-bold py-2.5 rounded-xl shadow text-xs">确认无误，结账出单</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 模拟小票打印弹窗 -->
+    <div id="receipt-modal" class="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-white border border-[#E6D5B8] rounded-2xl p-6 max-w-sm w-full shadow-2xl flex flex-col items-center">
+            <div class="text-[#C59B27] text-lg font-black mb-1">🪪 模拟收银小票已生成</div>
+            <div class="bg-[#FFFDF9] text-black p-5 rounded-lg shadow-inner w-full text-xs receipt-font space-y-2 border border-[#E6D5B8] my-3">
+                <div class="text-center font-bold text-sm">【鼎盛轩大酒楼】</div>
+                <div class="text-center text-[10px] text-stone-500 border-b border-black pb-2">DIING SHENG XUAN RESTAURANT</div>
+                <div class="flex justify-between pt-1">
+                    <span>桌号：<strong id="rec-table">--</strong></span>
+                    <span>单号：#<span id="rec-order-id">10028</span></span>
+                </div>
+                <div class="text-[10px] text-stone-500 border-b border-dashed border-stone-400 pb-2">
+                    时间：<span id="rec-time">--</span>
+                </div>
+                <div id="rec-items" class="space-y-1 py-1"></div>
+                <div class="border-t border-black pt-2 space-y-1">
+                    <div class="flex justify-between font-bold text-sm">
+                        <span>总计 Total:</span>
+                        <span>RM <span id="rec-total">0.00</span></span>
+                    </div>
+                    <div class="flex justify-between text-[10px]">
+                        <span>付款方式 Method:</span>
+                        <span id="rec-method" class="font-bold">CASH</span>
+                    </div>
+                </div>
+                <div class="text-center text-[10px] pt-3 border-t border-dashed border-stone-400">✨ 谢谢惠顾，欢迎再次光临！✨</div>
+            </div>
+            <button onclick="closeReceiptModal()" class="w-full bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white font-bold py-3 rounded-xl shadow text-sm">完成结账并释放桌位</button>
+        </div>
+    </div>
+
+    <!-- 逻辑脚本 -->
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyDShBrt-3CAAGQf4eP1T1zNf0q95MtGyPA",
+            authDomain: "restaurant-order-a8ed8.firebaseapp.com",
+            projectId: "restaurant-order-a8ed8",
+            storageBucket: "restaurant-order-a8ed8.firebasestorage.app",
+            messagingSenderId: "535128667185",
+            appId: "1:535128667185:web:6759dd6435d535d8349110"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
+        setInterval(() => {
+            document.getElementById('current-time').innerText = new Date().toLocaleTimeString();
+        }, 1000);
+
+        let tablesMap = {};
+        let currentSelectedTableId = null;
+        let currentPaymentMethod = 'cash';
+        let currentFilter = 'all';
+
+        function showPosToast(msg) {
+            const toast = document.getElementById('pos-toast');
+            if (!toast) return;
+            document.getElementById('pos-toast-text').innerText = msg;
+            toast.classList.remove('opacity-0');
+            setTimeout(() => {
+                toast.classList.add('opacity-0');
+            }, 2500);
+        }
+
+        function getCustomerLevel(m) {
+            let spent = Number(m.totalSpent || 0);
+            let orders = Number(m.totalOrders || 0);
+            let lastVisitTime = m.lastVisit ? new Date(m.lastVisit).getTime() : 0;
+            let now = new Date().getTime();
+            let days30 = 30 * 24 * 60 * 60 * 1000;
+
+            if (spent > 1000) return { text: "👑 VIP", class: "bg-amber-100 text-amber-800 border-amber-300" };
+            if (orders >= 5) return { text: "🔥 回头客", class: "bg-orange-100 text-orange-800 border-orange-300" };
+            if (orders === 1 && (now - lastVisitTime < days30)) return { text: "🌱 新客", class: "bg-emerald-100 text-emerald-800 border-emerald-300" };
+            if (orders > 0 && lastVisitTime > 0 && (now - lastVisitTime > days30)) return { text: "💤 待唤醒", class: "bg-rose-100 text-rose-800 border-rose-300" };
+            return { text: "👤 普通顾客", class: "bg-slate-100 text-slate-700 border-slate-200" };
+        }
+
+        document.addEventListener("DOMContentLoaded", () => {
+            const statusDot = document.getElementById('db-status-dot');
+            const statusText = document.getElementById('db-status-text');
+
+            db.collection('tables').onSnapshot(snapshot => {
+                statusDot.className = "w-2.5 h-2.5 rounded-full bg-emerald-500";
+                statusText.innerText = "已实时连通";
+                
+                tablesMap = {};
+                snapshot.forEach(doc => {
+                    tablesMap[doc.id] = doc.data();
+                });
+
+                renderTablesGrid();
+                
+                if (currentSelectedTableId && tablesMap[currentSelectedTableId]) {
+                    selectTable(currentSelectedTableId);
+                }
+            }, error => {
+                console.error("Firebase 实时监听失败:", error);
+                statusDot.className = "w-2.5 h-2.5 rounded-full bg-red-500";
+                statusText.innerText = "连接异常";
+            });
+        });
+
+        function renderTablesGrid() {
+            const grid = document.getElementById('tables-grid');
+            grid.innerHTML = '';
+
+            const defaultTableIds = ['V1','V2','V3','V4','V5','V6','V7','V8','V9','V10','V11','V12'];
+            
+            defaultTableIds.forEach(id => {
+                let tbl = tablesMap[id] || { status: 'free', phone: '', items: [] };
+                if (currentFilter !== 'all' && tbl.status !== currentFilter) return;
+
+                let isSelected = id === currentSelectedTableId ? 'ring-2 ring-[#D4AF37] border-[#D4AF37] shadow-md' : '';
+                let cardStyle = tbl.status === 'occupied' ? 'bg-[#FFF9EB] border-[#E6C687]' : 'bg-white border-[#E6D5B8]';
+                
+                let statusBadge = tbl.status === 'occupied' 
+                    ? '<span class="text-[10px] text-amber-800 bg-amber-100 px-2.5 py-0.5 rounded-full font-black border border-amber-300">🟠 用餐中</span>' 
+                    : '<span class="text-[10px] text-emerald-800 bg-emerald-100 px-2.5 py-0.5 rounded-bold border border-emerald-300">🟢 空闲</span>';
+
+                let total = 0;
+                if (tbl.items && Array.isArray(tbl.items)) {
+                    tbl.items.forEach(i => total += (Number(i.price || 0) * Number(i.qty || 1)));
+                }
+
+                grid.innerHTML += `
+                    <div onclick="selectTable('${id}')" class="p-3 rounded-2xl border cursor-pointer transition flex flex-col justify-between h-24 ${cardStyle} ${isSelected}">
+                        <div class="flex justify-between items-center"><span class="font-black text-base text-[#2C221E]">${id}</span>${statusBadge}</div>
+                        <div>
+                            <div class="text-[10px] text-[#8C7A6B] font-semibold truncate">${tbl.phone ? '📱 ' + tbl.phone : '散客'}</div>
+                            <div class="text-xs font-black text-[#C59B27] font-mono mt-0.5">${tbl.status === 'free' ? 'RM 0.00' : 'RM ' + total.toFixed(2)}</div>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
+        function filterTables(type) {
+            currentFilter = type;
+            document.getElementById('tab-all').className = type === 'all' ? "px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white shadow" : "px-3.5 py-2 rounded-xl text-xs font-bold bg-white text-[#5C4A42] border border-[#E6D5B8]";
+            document.getElementById('tab-occupied').className = type === 'occupied' ? "px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white shadow" : "px-3.5 py-2 rounded-xl text-xs font-bold bg-[#FFF9EB] text-[#C59B27] border border-[#E6C687]";
+            document.getElementById('tab-free').className = type === 'free' ? "px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white shadow" : "px-3.5 py-2 rounded-xl text-xs font-bold bg-[#F2EDE4] text-[#5C4A42] border border-[#E6D5B8]";
+            renderTablesGrid();
+        }
+
+        async function selectTable(tableId) {
+            currentSelectedTableId = tableId;
+            renderTablesGrid();
+            const tbl = tablesMap[tableId] || { status: 'free', phone: '', items: [] };
+            
+            document.getElementById('selected-table-title').innerText = `${tableId} 桌`;
+            
+            const phoneEl = document.getElementById('selected-customer-phone');
+            if (tbl.phone) {
+                phoneEl.innerHTML = `${tbl.phone} <span class="text-[10px] text-slate-400">读取中...</span>`;
+                try {
+                    const memberDoc = await db.collection('restaurant_members').doc(tbl.phone).get();
+                    if (memberDoc.exists) {
+                        const mData = memberDoc.data();
+                        const lvl = getCustomerLevel(mData);
+                        phoneEl.innerHTML = `${tbl.phone} <span class="px-2 py-0.5 rounded border text-[10px] font-bold ${lvl.class}">${lvl.text}</span>`;
+                    } else {
+                        phoneEl.innerHTML = `${tbl.phone} <span class="px-2 py-0.5 rounded border text-[10px] font-bold bg-slate-100 text-slate-600">👤 普通顾客</span>`;
+                    }
+                } catch(e) {
+                    phoneEl.innerText = `${tbl.phone} (档案加载失败)`;
+                }
+            } else {
+                phoneEl.innerText = '散客 / 未绑定';
+            }
+
+            const container = document.getElementById('order-items-list');
+            container.innerHTML = '';
+            let grandTotal = 0;
+
+            if (!tbl.items || tbl.items.length === 0) {
+                container.innerHTML = `<div class="text-center text-[#8C7A6B] py-20 font-bold text-xs">该桌台目前没有点餐记录 (空闲)</div>`;
+            } else {
+                tbl.items.forEach((item, index) => {
+                    const price = Number(item.price || 0);
+                    const qty = Number(item.qty || 1);
+                    const itemTotal = price * qty;
+                    grandTotal += itemTotal;
+
+                    const noteHtml = item.note ? `<div class="text-[10px] text-[#C59B27] font-medium mt-0.5">备注: ${item.note}</div>` : '';
+
+                    let marketPricingHtml = '';
+                    if (item.isMarket) {
+                        const isUnpriced = price === 0;
+                        const statusWarning = isUnpriced 
+                            ? `<span class="text-red-600 font-black animate-pulse-fast bg-red-50 px-2 py-0.5 rounded border border-red-200">⚠️ 待称重设价 (未确认)</span>` 
+                            : `<span class="text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">✅ 已定价</span>`;
+
+                        marketPricingHtml = `
+                            <div class="mt-1.5 flex flex-col space-y-1.5 bg-[#FFF9EB] p-2.5 rounded-xl border border-[#E6C687]">
+                                <div class="flex justify-between items-center text-[10px]">
+                                    <span>称重设价状态：</span>
+                                    ${statusWarning}
+                                </div>
+                                <div class="flex items-center space-x-2">
+                                    <input type="number" id="market-input-${index}" placeholder="${!isUnpriced ? price : '输入称重总价(RM)'}" class="flex-1 bg-white border border-[#D4AF37] rounded-lg px-2.5 py-1 text-xs font-bold text-[#2C221E] focus:outline-none">
+                                    <button onclick="updateSingleMarketPrice(${index})" class="bg-gradient-to-r from-[#D4AF37] to-[#C59B27] text-white px-3.5 py-1 rounded-lg font-bold text-xs shadow">设价/改价</button>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    container.innerHTML += `
+                        <div class="bg-[#FBF9F5] p-2.5 rounded-xl border border-[#E6D5B8] flex flex-col flex-shrink-0 mb-2">
+                            <div class="flex justify-between items-center">
+                                <div class="flex-1 pr-2 min-w-0">
+                                    <div class="font-bold text-[#2C221E] text-xs truncate">${item.name}</div>
+                                    <div class="text-[10px] text-[#8C7A6B]">单价：${item.isMarket && price === 0 ? '<span class="text-red-600 font-black">待核算(未输入)</span>' : 'RM ' + price.toFixed(2)}</div>
+                                    ${noteHtml}
+                                </div>
+                                <div class="font-black text-[#5C4A42] w-8 text-center text-xs">x${qty}</div>
+                                <div class="font-mono font-black text-[#C59B27] w-20 text-right text-xs">
+                                    ${item.isMarket && price === 0 ? '<span class="text-red-600 font-bold">待估价</span>' : 'RM ' + itemTotal.toFixed(2)}
+                                </div>
+                            </div>
+                            ${marketPricingHtml}
+                        </div>
+                    `;
+                });
+            }
+
+            document.getElementById('bill-total-price').innerText = grandTotal.toFixed(2);
+            window.currentGrandTotal = grandTotal;
+
+            calculateChange();
+        }
+
+        async function updateSingleMarketPrice(index) {
+            const inputEl = document.getElementById(`market-input-${index}`);
+            if (!inputEl) return;
+            const val = parseFloat(inputEl.value);
+            if (!val || val <= 0) { 
+                showPosToast('⚠️ 请输入有效的称重总价！'); 
+                return; 
+            }
+
+            const tbl = tablesMap[currentSelectedTableId];
+            if (!tbl || !tbl.items || !tbl.items[index]) return;
+
+            tbl.items[index].price = val;
+
+            try {
+                await db.collection('tables').doc(currentSelectedTableId).update({ items: tbl.items });
+                showPosToast(`✅ ${tbl.items[index].name} 价格设置成功！`);
+            } catch (e) {
+                console.error(e);
+                showPosToast('❌ 同步到云端失败');
+            }
+        }
+
+        function openFullOrderModal() {
+            if (!currentSelectedTableId) {
+                showPosToast('⚠️ 请先在左侧选择一个桌台！');
+                return;
+            }
+            const tbl = tablesMap[currentSelectedTableId] || { status: 'free', items: [] };
+            document.getElementById('full-modal-table-title').innerText = `${currentSelectedTableId} 桌`;
+            
+            const container = document.getElementById('full-order-items-container');
+            container.innerHTML = '';
+            let total = 0;
+
+            if (!tbl.items || tbl.items.length === 0) {
+                container.innerHTML = `<div class="text-center text-[#8C7A6B] py-12 text-sm font-bold">该桌目前没有点餐记录</div>`;
+            } else {
+                tbl.items.forEach(i => {
+                    const p = Number(i.price || 0);
+                    const q = Number(i.qty || 1);
+                    const sub = p * q;
+                    total += sub;
+                    container.innerHTML += `
+                        <div class="py-2.5 flex justify-between items-center">
+                            <div>
+                                <div class="font-black text-sm text-[#2C221E]">${i.name}</div>
+                                <div class="text-[11px] text-[#C59B27]">做法/备注：${i.note || '无特殊要求'}</div>
+                                <div class="text-[10px] text-stone-500">单价：${i.isMarket && p === 0 ? '<span class="text-red-500 font-bold">时价待核算</span>' : 'RM ' + p.toFixed(2)}</div>
+                            </div>
+                            <div class="text-right">
+                                <div class="font-bold text-sm">x${q}</div>
+                                <div class="font-mono font-black text-[#C59B27] text-sm">${i.isMarket && p === 0 ? '<span class="text-red-500 font-bold">待估价</span>' : 'RM ' + sub.toFixed(2)}</div>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            document.getElementById('full-modal-total').innerText = total.toFixed(2);
+            document.getElementById('full-order-modal').classList.remove('hidden');
+        }
+
+        function closeFullOrderModal() {
+            document.getElementById('full-order-modal').classList.add('hidden');
+        }
+
+        function selectPayment(method) {
+            currentPaymentMethod = method;
+            document.querySelectorAll('.pay-btn').forEach(btn => {
+                btn.className = "pay-btn border border-[#E6D5B8] bg-white text-[#5C4A42] font-bold py-1.5 rounded-xl text-xs flex flex-col items-center";
+            });
+            document.getElementById(`pay-${method}`).className = "pay-btn border-2 border-[#D4AF37] bg-[#FFF9EB] text-[#2C221E] font-bold py-1.5 rounded-xl text-xs flex flex-col items-center shadow-sm";
+            const calc = document.getElementById('cash-calculator');
+            if (method === 'cash') calc.classList.remove('hidden'); else calc.classList.add('hidden');
+        }
+
+        function calculateChange() {
+            const received = parseFloat(document.getElementById('cash-received').value) || 0;
+            const total = window.currentGrandTotal || 0;
+            const change = received - total;
+            document.getElementById('cash-change').innerText = change > 0 ? change.toFixed(2) : '0.00';
+        }
+
+        function promptCheckout() {
+            if (!currentSelectedTableId) { 
+                showPosToast('⚠️ 请先选择要结账的桌台！'); 
+                return; 
+            }
+            const tbl = tablesMap[currentSelectedTableId];
+            if (!tbl || !tbl.items || tbl.items.length === 0) { 
+                showPosToast('⚠️ 当前桌台没有消费明细！'); 
+                return; 
+            }
+
+            const unpricedItem = tbl.items.find(i => i.isMarket && Number(i.price || 0) === 0);
+            if (unpricedItem) {
+                showPosToast(`❌ 拦截：[${unpricedItem.name}] 尚未设定称重价格，无法结账！`);
+                return;
+            }
+
+            document.getElementById('confirm-modal-table').innerText = `${currentSelectedTableId} 桌`;
+            document.getElementById('confirm-modal-total').innerText = (window.currentGrandTotal || 0).toFixed(2);
+            document.getElementById('checkout-confirm-modal').classList.remove('hidden');
+        }
+
+        function closeCheckoutConfirmModal() {
+            document.getElementById('checkout-confirm-modal').classList.add('hidden');
+        }
+
+        function executeCheckout() {
+            closeCheckoutConfirmModal();
+
+            document.getElementById('rec-table').innerText = currentSelectedTableId;
+            document.getElementById('rec-order-id').innerText = Math.floor(10000 + Math.random() * 90000);
+            document.getElementById('rec-time').innerText = new Date().toLocaleString();
+            document.getElementById('rec-total').innerText = (window.currentGrandTotal || 0).toFixed(2);
+            document.getElementById('rec-method').innerText = currentPaymentMethod.toUpperCase();
+
+            const itemsContainer = document.getElementById('rec-items');
+            itemsContainer.innerHTML = '';
+            const tbl = tablesMap[currentSelectedTableId];
+            tbl.items.forEach(i => {
+                itemsContainer.innerHTML += `<div class="flex justify-between text-[11px]"><span>${i.name} x${i.qty}</span><span class="font-mono font-bold">RM ${(i.price * i.qty).toFixed(2)}</span></div>`;
+            });
+            
+            document.getElementById('receipt-modal').classList.remove('hidden');
+        }
+
+        async function closeReceiptModal() {
+            document.getElementById('receipt-modal').classList.add('hidden');
+            
+            try {
+                // 💡 升级版核心修复：结账清台时，精准统计整单真实消费金额，并压入 visits 拜访明细数组同步云端
+                const tbl = tablesMap[currentSelectedTableId];
+                if (tbl && tbl.phone && tbl.items) {
+                    let grandTotal = 0;
+                    tbl.items.forEach(i => {
+                        grandTotal += (Number(i.price || 0) * Number(i.qty || 1));
+                    });
+
+                    const memberRef = db.collection('restaurant_members').doc(tbl.phone);
+                    const docSnap = await memberRef.get();
+                    
+                    let visitRecord = {
+                        date: new Date().toISOString(),
+                        items: tbl.items,
+                        total: grandTotal
+                    };
+
+                    if (docSnap.exists) {
+                        let mData = docSnap.data();
+                        let currentSpent = Number(mData.totalSpent || 0);
+                        let visits = mData.visits || [];
+                        visits.push(visitRecord);
+
+                        await memberRef.update({
+                            totalSpent: currentSpent + grandTotal,
+                            totalOrders: Number(mData.totalOrders || 0) + 1,
+                            lastVisit: new Date().toISOString(),
+                            visits: visits
+                        });
+                    } else {
+                        await memberRef.set({
+                            phone: tbl.phone,
+                            totalOrders: 1,
+                            totalSpent: grandTotal,
+                            firstVisit: new Date().toLocaleDateString(),
+                            lastVisit: new Date().toISOString(),
+                            visits: [visitRecord]
+                        });
+                    }
+                }
+
+                await db.collection('tables').doc(currentSelectedTableId).set({
+                    status: 'free',
+                    phone: '',
+                    items: []
+                }, { merge: true });
+
+                showPosToast('✅ 结账成功，桌台已自动释放！');
+            } catch (e) {
+                console.error(e);
+                showPosToast('结账完成，但云端清台同步失败');
+            }
+        }
+    </script>
+</body>
+</html>
